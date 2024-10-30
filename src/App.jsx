@@ -2,7 +2,22 @@ import { createSignal, createEffect } from 'solid-js';
 import PVSelector from './components/controls/PVSelector';
 import TimeRangeSelector from './components/controls/TimeRangeSelector';
 import EPICSChart from './components/chart/EPICSChart';
-import { fetchPVData } from './utils/api';
+
+// Base URL for the LCLS archive appliance
+const BASE_URL = 'http://lcls-archapp.slac.stanford.edu/retrieval/data';
+
+/**
+ * Format date with correct timezone offset for EPICS archiver
+ */
+const formatDateForArchiver = (date) => {
+  const d = new Date(date);
+  // Check if we're in PST or PDT
+  const offset = d.getTimezoneOffset();
+  const isDST = offset < new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
+  const tzString = isDST ? '-07:00' : '-08:00';
+  
+  return d.toISOString().slice(0, -5) + '.000' + tzString;
+};
 
 const ArchiveViewer = () => {
   const [selectedPVs, setSelectedPVs] = createSignal([]);
@@ -17,7 +32,27 @@ const ArchiveViewer = () => {
       timestamp: new Date().toISOString(),
       message,
       type
-    }].slice(-50)); // Keep last 50 messages
+    }].slice(-50));
+  };
+
+  const fetchPVData = async (pv, from, to) => {
+    const url = new URL(`${BASE_URL}/getData.json`);
+    url.searchParams.set('pv', pv);
+    url.searchParams.set('from', formatDateForArchiver(from));
+    url.searchParams.set('to', formatDateForArchiver(to));
+
+    console.log('Fetching data from URL:', url.toString());
+
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Server response:', errorText);
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log('Received data:', data);
+    return data;
   };
 
   const handleRefresh = async () => {
@@ -34,10 +69,21 @@ const ArchiveViewer = () => {
     addDebugLog(`Fetching data for ${selectedPVs().length} PVs...`);
     
     try {
-      const responseData = await fetchPVData(selectedPVs(), timeRange().start, timeRange().end);
+      const promises = selectedPVs().map(pv => fetchPVData(pv, timeRange().start, timeRange().end));
+      const responseData = await Promise.all(promises);
+      
+      console.log('All response data:', responseData);
       setData(responseData);
       setLastResponse(responseData);
-      addDebugLog(`Successfully fetched ${responseData.length} data points`, 'success');
+      
+      let totalPoints = 0;
+      responseData.forEach((pvData, index) => {
+        const points = pvData[0]?.data?.length || 0;
+        totalPoints += points;
+        addDebugLog(`Fetched ${points} points for ${selectedPVs()[index]}`, 'success');
+      });
+      
+      addDebugLog(`Total data points: ${totalPoints}`, 'success');
     } catch (error) {
       addDebugLog(`Error: ${error.message}`, 'error');
       console.error('Error fetching data:', error);
@@ -86,13 +132,12 @@ const ArchiveViewer = () => {
               <TimeRangeSelector 
                 onChange={(start, end) => {
                   setTimeRange({ start, end });
-                  addDebugLog(`Time range updated: ${start} to ${end}`);
+                  addDebugLog(`Time range updated: ${formatDateForArchiver(start)} to ${formatDateForArchiver(end)}`);
                 }}
                 disabled={loading()}
               />
             </div>
             
-            {/* Debug Console */}
             <div class="bg-white rounded-lg shadow-md p-6">
               <div class="flex justify-between items-center mb-4">
                 <h2 class="text-lg font-semibold">Debug Console</h2>
@@ -149,7 +194,6 @@ const ArchiveViewer = () => {
               />
             </div>
 
-            {/* API Response Viewer */}
             <div class="bg-white rounded-lg shadow-md p-6">
               <h2 class="text-lg font-semibold mb-4">API Response</h2>
               <div class="h-48 overflow-y-auto font-mono text-sm bg-gray-50 p-3 rounded">

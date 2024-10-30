@@ -1,82 +1,71 @@
 const BASE_URL = 'http://lcls-archapp.slac.stanford.edu/retrieval/data';
 
 /**
- * Gets current timezone offset in format "-07:00" or "-08:00"
+ * Gets data for a PV with optional binning
+ * @param {string} pv - PV name
+ * @param {string} from - Start time in ISO format
+ * @param {string} to - End time in ISO format
+ * @param {Object} options - Optional parameters
+ * @param {string} options.operator - Binning operator (e.g., 'mean', 'max', 'min')
+ * @param {number} options.binSize - Bin size in seconds (e.g., 900 for 15min, 3600 for 1h)
  */
-const getTimezoneOffset = () => {
-  const now = new Date();
-  const isDST = now.getTimezoneOffset() < new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
-  return isDST ? '-07:00' : '-08:00';
-};
+export const fetchPVData = async (pv, from, to, options = {}) => {
+  // Format PV name with operator if binning is requested
+  let processedPV = pv;
+  if (options.operator && options.binSize) {
+    processedPV = `${options.operator}_${options.binSize}(${pv})`;
+  }
 
-/**
- * Fetches data for multiple PVs at a specific time
- */
-export const fetchPVDataAtTime = async (pvs) => {
-  const now = new Date();
-  const formattedDate = now.toISOString().slice(0, -5) + '.000' + getTimezoneOffset();
+  const url = new URL(`${BASE_URL}/getData.json`);
+  url.searchParams.set('pv', processedPV);
+  url.searchParams.set('from', from);
+  url.searchParams.set('to', to);
 
-  const params = new URLSearchParams({
-    at: formattedDate
-  });
+  console.log('Fetching data from URL:', url.toString());
 
   try {
-    console.log('Request URL:', `${BASE_URL}/getDataAtTime?${params}`);
-    console.log('Request Body:', JSON.stringify(pvs));
-
-    const response = await fetch(`${BASE_URL}/getDataAtTime?${params}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(pvs)
-    });
-
-    console.log('Response status:', response.status);
-    const responseText = await response.text();
-    console.log('Response text:', responseText);
-
+    const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}, body: ${responseText}`);
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
-
-    return JSON.parse(responseText);
+    return await response.json();
   } catch (error) {
-    console.error('Error details:', error);
+    console.error('Error fetching PV data:', error);
     throw error;
   }
 };
 
 /**
- * Fetches historical data for a single PV
+ * Fetches binned data for multiple PVs
  */
-export const fetchPVData = async (pv, from, to) => {
-  // Format dates with timezone offset
-  const fromDate = new Date(from);
-  const toDate = new Date(to);
-  const tzOffset = getTimezoneOffset();
+export const fetchBinnedData = async (pvs, from, to, options = { operator: 'mean', binSize: 900 }) => {
+  try {
+    const requests = pvs.map(pv => fetchPVData(pv, from, to, options));
+    const results = await Promise.all(requests);
+    return results;
+  } catch (error) {
+    console.error('Error fetching binned data:', error);
+    throw error;
+  }
+};
 
-  const fromStr = fromDate.toISOString().slice(0, -5) + '.000' + tzOffset;
-  const toStr = toDate.toISOString().slice(0, -5) + '.000' + tzOffset;
-
-  const url = new URL(`${BASE_URL}/getData.json`);
-  url.searchParams.set('pv', pv);
-  url.searchParams.set('from', fromStr);
-  url.searchParams.set('to', toStr);
+/**
+ * Gets current value for multiple PVs
+ */
+export const fetchPVDataAtTime = async (pvs, timestamp) => {
+  const url = new URL(`${BASE_URL}/getDataAtTime`);
+  url.searchParams.set('at', timestamp);
 
   try {
-    console.log('Fetching data from URL:', url.toString());
-    
-    const response = await fetch(url.toString(), {
+    const response = await fetch(url, {
+      method: 'POST',
       headers: {
-        'Accept': 'application/json'
-      }
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(pvs)
     });
 
     if (!response.ok) {
-      const text = await response.text();
-      console.error('Error response:', text);
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
@@ -85,17 +74,4 @@ export const fetchPVData = async (pv, from, to) => {
     console.error('Error fetching PV data:', error);
     throw error;
   }
-};
-
-// Test function
-export const testAPI = async () => {
-  const testPVs = [
-    "VPIO:IN20:111:VRAW",
-    "ROOM:LI30:1:OUTSIDE_TEMP"
-  ];
-
-  console.log('Testing API with PVs:', testPVs);
-  const result = await fetchPVDataAtTime(testPVs);
-  console.log('Test result:', result);
-  return result;
 };
