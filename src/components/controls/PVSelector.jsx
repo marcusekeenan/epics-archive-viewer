@@ -1,6 +1,12 @@
 import { createSignal } from 'solid-js';
 
 const PVSelector = (props) => {
+  // Add default PV on component mount
+  const defaultPV = "ROOM:LI30:1:OUTSIDE_TEMP";
+  if (props.selectedPVs().length === 0) {
+    props.onAddPV(defaultPV);
+  }
+ 
   const [searchText, setSearchText] = createSignal('');
 
   const handleSearch = (e) => {

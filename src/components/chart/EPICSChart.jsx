@@ -1,187 +1,290 @@
-import { createEffect } from 'solid-js';
-import * as d3 from 'd3';
+import { onMount, createEffect, createSignal, onCleanup } from 'solid-js';
+import uPlot from 'uplot';
+import { fetchBinnedData } from '../../utils/archiverApi';
+import 'uplot/dist/uPlot.min.css';
 
 const EPICSChart = (props) => {
-  let svgRef;
+  let chartRef;
+  let uPlotInstance;
+  const [isRealTime, setIsRealTime] = createSignal(false);
+  const [isLoading, setIsLoading] = createSignal(false);
+  let realtimeInterval;
+
+  const processData = (rawData) => {
+    if (!rawData?.length) return null;
+    
+    const timestamps = [];
+    const seriesData = {};
+    const series = [{ 
+      label: 'Time',
+      value: (u, v) => v != null ? new Date(v * 1e3).toLocaleString('en-US', { 
+        timeZone: props.timezone || 'UTC',
+        dateStyle: 'short',
+        timeStyle: 'medium'
+      }) : '-'
+    }];
   
-  const width = 928;
-  const height = 600;
-  const marginTop = 20;
-  const marginRight = 30;
-  const marginBottom = 30;
-  const marginLeft = 60;
-
-  const initChart = () => {
-    if (!props.data || !Array.isArray(props.data) || props.data.length === 0) {
-      console.log('No valid data to display');
-      return;
-    }
-
-    // Process the EPICS data structure
-    const processedData = props.data.flatMap((pvResponse) => {
-      if (!pvResponse[0] || !pvResponse[0].data) return [];
+    rawData.forEach(pvData => {
+      if (!pvData.data?.[0]?.data?.length) return;
+  
+      const pvInfo = pvData.data[0];
+      const name = pvInfo.meta?.name;
+      const unit = pvInfo.meta?.EGU || '';
       
-      const pvName = pvResponse[0].meta?.name || 'Unknown PV';
-      const unit = pvResponse[0].meta?.EGU || '';
-      
-      // Group data into bins and calculate statistics
-      const binSize = 300; // 5 minutes in seconds
-      const bins = new Map();
-      
-      pvResponse[0].data.forEach(point => {
-        const binKey = Math.floor(point.secs / binSize) * binSize;
-        if (!bins.has(binKey)) {
-          bins.set(binKey, {
-            values: [],
-            timestamp: new Date(binKey * 1000),
-            pv: pvName,
-            unit: unit
-          });
+      // Add series for the PV
+      series.push({ 
+        label: `${name} (${unit})`,
+        stroke: `hsl(${Math.random() * 360}, 70%, 50%)`,
+        value: (u, rawValue) => {
+          if (rawValue == null) return '-';
+          
+          // Handle both array (statistical) and single values
+          const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+          return typeof value === 'number' ? value.toFixed(2) : '-';
         }
-        bins.get(binKey).values.push(point.val);
       });
-
-      // Calculate statistics for each bin
-      return Array.from(bins.values()).map(bin => ({
-        timestamp: bin.timestamp,
-        value: d3.mean(bin.values),
-        high: d3.max(bin.values),
-        low: d3.min(bin.values),
-        pv: bin.pv,
-        unit: bin.unit
-      }));
+      
+      seriesData[name] = new Array(pvInfo.data.length);
+      
+      
+      pvInfo.data.forEach((point, i) => {
+        if (i >= timestamps.length) {
+          timestamps[i] = point.secs;
+        }
+        seriesData[name][i] = point.val;
+      });
     });
+  
+    if (!timestamps.length || !Object.keys(seriesData).length) return null;
+  
+    return {
+      series,
+      data: [
+        timestamps,
+        ...Object.values(seriesData)
+      ]
+    };
+  };
 
-    if (processedData.length === 0) return;
-
-    // Clear previous chart
-    d3.select(svgRef).selectAll("*").remove();
-
-    const svg = d3.select(svgRef)
-      .attr("width", width)
-      .attr("height", height)
-      .attr("viewBox", [0, 0, width, height])
-      .attr("style", "max-width: 100%; height: auto; height: intrinsic;");
-
-    // Create scales
-    const x = d3.scaleUtc()
-      .domain(d3.extent(processedData, d => d.timestamp))
-      .range([marginLeft, width - marginRight]);
-
-    const y = d3.scaleLinear()
-      .domain([
-        d3.min(processedData, d => d.low),
-        d3.max(processedData, d => d.high)
-      ]).nice(10)
-      .range([height - marginBottom, marginTop]);
-
-    // Create the area generator for the band
-    const area = d3.area()
-      .curve(d3.curveMonotoneX)
-      .x(d => x(d.timestamp))
-      .y0(d => y(d.low))
-      .y1(d => y(d.high));
-
-    // Create the line generator for the mean
-    const line = d3.line()
-      .curve(d3.curveMonotoneX)
-      .x(d => x(d.timestamp))
-      .y(d => y(d.value));
-
-    // Add the band
-    svg.append("path")
-      .datum(processedData)
-      .attr("fill", "steelblue")
-      .attr("fill-opacity", 0.2)
-      .attr("d", area);
-
-    // Add the mean line
-    svg.append("path")
-      .datum(processedData)
-      .attr("fill", "none")
-      .attr("stroke", "steelblue")
-      .attr("stroke-width", 1.5)
-      .attr("d", line);
-
-    // Add the horizontal axis
-    svg.append("g")
-      .attr("transform", `translate(0,${height - marginBottom})`)
-      .call(d3.axisBottom(x)
-        .ticks(width / 80)
-        .tickSizeOuter(0))
-      .call(g => g.select(".domain").remove());
-
-    // Add the vertical axis, grid, and label
-    svg.append("g")
-      .attr("transform", `translate(${marginLeft},0)`)
-      .call(d3.axisLeft(y))
-      .call(g => g.select(".domain").remove())
-      .call(g => g.selectAll(".tick line").clone()
-        .attr("x2", width - marginLeft - marginRight)
-        .attr("stroke-opacity", 0.1))
-      .call(g => g.append("text")
-        .attr("x", -marginLeft)
-        .attr("y", 10)
-        .attr("fill", "currentColor")
-        .attr("text-anchor", "start")
-        .text(`↑ ${processedData[0].pv} (${processedData[0].unit})`));
-
-    // Add hover interaction
-    const hover = svg.append("g")
-      .style("pointer-events", "none");
-
-    svg.append("rect")
-      .attr("fill", "none")
-      .attr("pointer-events", "all")
-      .attr("width", width)
-      .attr("height", height)
-      .on("pointermove", pointermoved)
-      .on("pointerleave", pointerleft);
-
-    function pointermoved(event) {
-      const [xm, ym] = d3.pointer(event);
-      const i = d3.bisector(d => d.timestamp).left(processedData, x.invert(xm));
-      const d = processedData[i];
-
-      if (!d) return;
-
-      hover.style("display", null);
-      hover.attr("transform", `translate(${x(d.timestamp)},${y(d.value)})`);
-
-      const text = hover.selectAll("text")
-        .data([,])
-        .join("text")
-        .attr("fill", "white")
-        .attr("stroke", "black")
-        .attr("stroke-width", 3)
-        .attr("stroke-linejoin", "round")
-        .attr("y", -8);
-
-      text.text(`${d.value.toFixed(2)} ${d.unit}`);
-
-      hover.append("line")
-        .attr("stroke", "black")
-        .attr("stroke-width", 1)
-        .attr("y1", -y(d.value))
-        .attr("y2", height - marginBottom - y(d.value));
-    }
-
-    function pointerleft() {
-      hover.style("display", "none");
+  const fetchNewData = async (start, end) => {
+    if (!start || !end || start === end) return null;
+    
+    setIsLoading(true);
+    try {
+      const responseData = await fetchBinnedData(
+        props.pvs,
+        new Date(start * 1000),
+        new Date(end * 1000),
+        { width: chartRef?.clientWidth }
+      );
+      return processData(responseData);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+      return null;
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  const startRealtime = () => {
+    setIsRealTime(true);
+    realtimeInterval = setInterval(async () => {
+      if (!uPlotInstance) return;
+      
+      const end = Math.floor(Date.now() / 1000);
+      const start = end - (5 * 60);
+      
+      const newData = await fetchNewData(start, end);
+      if (newData) {
+        uPlotInstance.setData(newData.data);
+      }
+    }, 5000);
+  };
+
+  const stopRealtime = () => {
+    setIsRealTime(false);
+    if (realtimeInterval) {
+      clearInterval(realtimeInterval);
+    }
+  };
+
+  const formatTimeAxis = (u, timestamps) => {
+    if (!timestamps?.length) return [];
+    
+    return timestamps.map(ts => {
+      const date = new Date(ts * 1e3);
+      const range = u.scales.x.max - u.scales.x.min;
+      
+      return date.toLocaleString('en-US', {
+        timeZone: props.timezone || 'UTC',
+        ...range < 300 ? {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        } : range < 86400 ? {
+          hour: '2-digit',
+          minute: '2-digit'
+        } : {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        }
+      });
+    });
+  };
+
+  const initChart = (data) => {
+    if (uPlotInstance) {
+      uPlotInstance.destroy();
+    }
+
+    if (!data) return;
+
+    const opts = {
+      title: "EPICS Data",
+      width: chartRef.clientWidth,
+      height: 500,
+      series: data.series,
+      scales: {
+        x: {
+          time: true,
+          auto: false,
+          range: (u, dataMin, dataMax) => [dataMin, dataMax]
+        },
+        y: {
+          auto: true,
+          distr: 1
+        }
+      },
+      axes: [
+        {
+          scale: "x",
+          space: 100,
+          values: formatTimeAxis,
+          grid: { show: true },
+          ticks: { show: true }
+        },
+        {
+          scale: "y",
+          grid: { show: true },
+          ticks: { show: true },
+          size: 70
+        }
+      ],
+      cursor: {
+        drag: {
+          setScale: true,
+          x: true,
+          y: false
+        },
+        sync: {
+          key: 'epics-sync'
+        },
+        focus: {
+          prox: 30
+        }
+      },
+      hooks: {
+        setScale: [
+          async (u) => {
+            if (!isRealTime() && u.scales.x) {
+              const xRange = u.scales.x.range;
+              if (Array.isArray(xRange) && xRange.length === 2) {
+                const [minX, maxX] = xRange;
+                if (typeof minX === 'number' && typeof maxX === 'number' && minX !== maxX) {
+                  try {
+                    const newData = await fetchNewData(minX, maxX);
+                    if (newData?.data && Array.isArray(newData.data)) {
+                      u.setData(newData.data);
+                    }
+                  } catch (error) {
+                    console.error('Error updating data:', error);
+                  }
+                }
+              }
+            }
+          }
+        ],
+        ready: [
+          (u) => {
+            const controls = document.createElement('div');
+            controls.className = 'u-controls';
+            controls.style.position = 'absolute';
+            controls.style.top = '8px';
+            controls.style.right = '8px';
+            
+            controls.innerHTML = `
+              <button class="zoom-in px-2 py-1 bg-blue-500 text-white rounded mr-1">+</button>
+              <button class="zoom-out px-2 py-1 bg-blue-500 text-white rounded mr-1">-</button>
+              <button class="reset px-2 py-1 bg-blue-500 text-white rounded mr-1">Reset</button>
+              <button class="realtime px-2 py-1 bg-green-500 text-white rounded">
+                ${isRealTime() ? 'Stop' : 'Real-time'}
+              </button>
+            `;
+            
+            u.over.appendChild(controls);
+
+            controls.querySelector('.zoom-in').onclick = () => u.zoom(0.5, u.cursor.left);
+            controls.querySelector('.zoom-out').onclick = () => u.zoom(2.0, u.cursor.left);
+            controls.querySelector('.reset').onclick = () => {
+              const firstTimestamp = data.data[0][0];
+              const lastTimestamp = data.data[0][data.data[0].length - 1];
+              if (typeof firstTimestamp === 'number' && typeof lastTimestamp === 'number') {
+                u.setScale('x', { min: firstTimestamp, max: lastTimestamp });
+              }
+            };
+            controls.querySelector('.realtime').onclick = () => {
+              if (isRealTime()) {
+                stopRealtime();
+                controls.querySelector('.realtime').textContent = 'Real-time';
+                controls.querySelector('.realtime').className = 'realtime px-2 py-1 bg-green-500 text-white rounded';
+              } else {
+                startRealtime();
+                controls.querySelector('.realtime').textContent = 'Stop';
+                controls.querySelector('.realtime').className = 'realtime px-2 py-1 bg-red-500 text-white rounded';
+              }
+            };
+          }
+        ]
+      }
+    };
+
+    uPlotInstance = new uPlot(opts, data.data, chartRef);
+  };
+
+  onMount(() => {
+    const data = processData(props.data);
+    if (data) initChart(data);
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (uPlotInstance && chartRef) {
+        uPlotInstance.setSize({ width: chartRef.clientWidth, height: 500 });
+      }
+    });
+
+    resizeObserver.observe(chartRef);
+
+    onCleanup(() => {
+      resizeObserver.disconnect();
+      stopRealtime();
+      if (uPlotInstance) {
+        uPlotInstance.destroy();
+      }
+    });
+  });
+
   createEffect(() => {
-    console.log('Initializing chart with data:', props.data);
-    initChart();
+    const data = processData(props.data);
+    if (data) initChart(data);
   });
 
   return (
-    <div class="epics-chart w-full overflow-hidden bg-white rounded-lg p-4">
-      <svg ref={svgRef} class="w-full" />
-      {(!props.data || props.data.length === 0) && (
-        <div class="flex items-center justify-center h-full text-gray-500">
-          No data available
+    <div class="relative">
+      <div ref={chartRef} class="w-full" />
+      {isLoading() && (
+        <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+          <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
         </div>
       )}
     </div>
