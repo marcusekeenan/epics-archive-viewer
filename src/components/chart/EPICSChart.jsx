@@ -6,287 +6,217 @@ import 'uplot/dist/uPlot.min.css';
 const EPICSChart = (props) => {
   let chartRef;
   let uPlotInstance;
-  const [isRealTime, setIsRealTime] = createSignal(false);
   const [isLoading, setIsLoading] = createSignal(false);
-  let realtimeInterval;
+
+  const formatDate = (timestamp) => {
+    if (!timestamp) return 'N/A';
+    // Convert milliseconds to seconds if needed
+    const seconds = String(timestamp).length > 10 ? Math.floor(timestamp / 1000) : timestamp;
+    return new Date(seconds * 1000).toLocaleString();
+  };
 
   const processData = (rawData) => {
-    if (!rawData?.length) return null;
-    
+    if (!rawData?.[0]?.data) {
+      console.log('No data array found');
+      return null;
+    }
+
+    // Extract metadata and data points
+    const meta = rawData[0].meta;
+    const dataPoints = rawData[0].data;
+
+    console.log('Sample datapoint:', dataPoints[0]);
+
+    // Process data points
     const timestamps = [];
-    const seriesData = {};
-    const series = [{ 
-      label: 'Time',
-      value: (u, v) => v != null ? new Date(v * 1e3).toLocaleString('en-US', { 
-        timeZone: props.timezone || 'UTC',
-        dateStyle: 'short',
-        timeStyle: 'medium'
-      }) : '-'
-    }];
-  
-    rawData.forEach(pvData => {
-      if (!pvData.data?.[0]?.data?.length) return;
-  
-      const pvInfo = pvData.data[0];
-      const name = pvInfo.meta?.name;
-      const unit = pvInfo.meta?.EGU || '';
-      
-      // Add series for the PV
-      series.push({ 
-        label: `${name} (${unit})`,
-        stroke: `hsl(${Math.random() * 360}, 70%, 50%)`,
-        value: (u, rawValue) => {
-          if (rawValue == null) return '-';
-          
-          // Handle both array (statistical) and single values
-          const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
-          return typeof value === 'number' ? value.toFixed(2) : '-';
-        }
-      });
-      
-      seriesData[name] = new Array(pvInfo.data.length);
-      
-      
-      pvInfo.data.forEach((point, i) => {
-        if (i >= timestamps.length) {
-          timestamps[i] = point.secs;
-        }
-        seriesData[name][i] = point.val;
-      });
+    const values = [];
+
+    dataPoints.forEach(point => {
+      // Convert to seconds if in milliseconds
+      const timestamp = point.timestamp ? Math.floor(point.timestamp / 1000) : point.secs;
+      const value = point.value ?? point.val;
+
+      if (timestamp && typeof value === 'number') {
+        timestamps.push(timestamp);
+        values.push(value);
+      }
     });
-  
-    if (!timestamps.length || !Object.keys(seriesData).length) return null;
-  
+
+    console.log('Processed data:', {
+      points: timestamps.length,
+      first: { time: formatDate(timestamps[0]), value: values[0] },
+      last: { time: formatDate(timestamps[timestamps.length - 1]), value: values[values.length - 1] }
+    });
+
+    // Find min/max for y-axis
+    const minVal = Math.min(...values);
+    const maxVal = Math.max(...values);
+    const range = maxVal - minVal;
+    const padding = range * 0.1;
+
     return {
-      series,
-      data: [
-        timestamps,
-        ...Object.values(seriesData)
-      ]
+      name: meta.name,
+      unit: meta.EGU,
+      data: [timestamps, values],
+      yRange: [minVal - padding, maxVal + padding]
     };
   };
 
-  const fetchNewData = async (start, end) => {
-    if (!start || !end || start === end) return null;
-    
-    setIsLoading(true);
-    try {
-      const responseData = await fetchBinnedData(
-        props.pvs,
-        new Date(start * 1000),
-        new Date(end * 1000),
-        { width: chartRef?.clientWidth }
-      );
-      return processData(responseData);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const initChart = () => {
+    if (!chartRef || !props.data) return;
 
-  const startRealtime = () => {
-    setIsRealTime(true);
-    realtimeInterval = setInterval(async () => {
-      if (!uPlotInstance) return;
-      
-      const end = Math.floor(Date.now() / 1000);
-      const start = end - (5 * 60);
-      
-      const newData = await fetchNewData(start, end);
-      if (newData) {
-        uPlotInstance.setData(newData.data);
-      }
-    }, 5000);
-  };
+    const processedData = processData(props.data);
+    if (!processedData?.data?.[0]?.length) return;
 
-  const stopRealtime = () => {
-    setIsRealTime(false);
-    if (realtimeInterval) {
-      clearInterval(realtimeInterval);
-    }
-  };
-
-  const formatTimeAxis = (u, timestamps) => {
-    if (!timestamps?.length) return [];
-    
-    return timestamps.map(ts => {
-      const date = new Date(ts * 1e3);
-      const range = u.scales.x.max - u.scales.x.min;
-      
-      return date.toLocaleString('en-US', {
-        timeZone: props.timezone || 'UTC',
-        ...range < 300 ? {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit'
-        } : range < 86400 ? {
-          hour: '2-digit',
-          minute: '2-digit'
-        } : {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        }
-      });
-    });
-  };
-
-  const initChart = (data) => {
+    // Clean up existing instance
     if (uPlotInstance) {
       uPlotInstance.destroy();
+      uPlotInstance = null;
     }
 
-    if (!data) return;
+    // Clear container
+    chartRef.innerHTML = '';
 
     const opts = {
-      title: "EPICS Data",
-      width: chartRef.clientWidth,
-      height: 500,
-      series: data.series,
+      title: processedData.name,
+      width: chartRef.clientWidth || 800,
+      height: 400,
+      series: [
+        {
+          label: "Time",
+          value: (u, v) => formatDate(v)
+        },
+        {
+          label: `${processedData.name} (${processedData.unit})`,
+          stroke: "rgb(0, 102, 204)",
+          width: 2,
+          points: {
+            show: true,
+            size: 4,
+          },
+          value: (u, v) => v?.toFixed(2),
+          scale: "temp"
+        }
+      ],
       scales: {
         x: {
           time: true,
-          auto: false,
-          range: (u, dataMin, dataMax) => [dataMin, dataMax]
         },
-        y: {
-          auto: true,
-          distr: 1
+        temp: {
+          auto: false,
+          range: processedData.yRange
         }
       },
       axes: [
         {
           scale: "x",
-          space: 100,
-          values: formatTimeAxis,
-          grid: { show: true },
-          ticks: { show: true }
+          values: (u, vals) => vals.map(formatDate),
+          side: 2,
+          grid: { show: true, stroke: "#dedede" },
+          ticks: { show: false }
         },
         {
-          scale: "y",
-          grid: { show: true },
-          ticks: { show: true },
-          size: 70
+          scale: "temp",
+          values: (u, vals) => vals.map(v => v.toFixed(2)),
+          side: 3,
+          grid: { show: true, stroke: "#dedede" },
+          ticks: { show: false }
         }
       ],
-      cursor: {
-        drag: {
-          setScale: true,
-          x: true,
-          y: false
-        },
-        sync: {
-          key: 'epics-sync'
-        },
-        focus: {
-          prox: 30
-        }
-      },
-      hooks: {
-        setScale: [
-          async (u) => {
-            if (!isRealTime() && u.scales.x) {
-              const xRange = u.scales.x.range;
-              if (Array.isArray(xRange) && xRange.length === 2) {
-                const [minX, maxX] = xRange;
-                if (typeof minX === 'number' && typeof maxX === 'number' && minX !== maxX) {
-                  try {
-                    const newData = await fetchNewData(minX, maxX);
-                    if (newData?.data && Array.isArray(newData.data)) {
-                      u.setData(newData.data);
-                    }
-                  } catch (error) {
-                    console.error('Error updating data:', error);
-                  }
-                }
-              }
-            }
-          }
-        ],
-        ready: [
-          (u) => {
-            const controls = document.createElement('div');
-            controls.className = 'u-controls';
-            controls.style.position = 'absolute';
-            controls.style.top = '8px';
-            controls.style.right = '8px';
-            
-            controls.innerHTML = `
-              <button class="zoom-in px-2 py-1 bg-blue-500 text-white rounded mr-1">+</button>
-              <button class="zoom-out px-2 py-1 bg-blue-500 text-white rounded mr-1">-</button>
-              <button class="reset px-2 py-1 bg-blue-500 text-white rounded mr-1">Reset</button>
-              <button class="realtime px-2 py-1 bg-green-500 text-white rounded">
-                ${isRealTime() ? 'Stop' : 'Real-time'}
-              </button>
-            `;
-            
-            u.over.appendChild(controls);
-
-            controls.querySelector('.zoom-in').onclick = () => u.zoom(0.5, u.cursor.left);
-            controls.querySelector('.zoom-out').onclick = () => u.zoom(2.0, u.cursor.left);
-            controls.querySelector('.reset').onclick = () => {
-              const firstTimestamp = data.data[0][0];
-              const lastTimestamp = data.data[0][data.data[0].length - 1];
-              if (typeof firstTimestamp === 'number' && typeof lastTimestamp === 'number') {
-                u.setScale('x', { min: firstTimestamp, max: lastTimestamp });
-              }
-            };
-            controls.querySelector('.realtime').onclick = () => {
-              if (isRealTime()) {
-                stopRealtime();
-                controls.querySelector('.realtime').textContent = 'Real-time';
-                controls.querySelector('.realtime').className = 'realtime px-2 py-1 bg-green-500 text-white rounded';
-              } else {
-                startRealtime();
-                controls.querySelector('.realtime').textContent = 'Stop';
-                controls.querySelector('.realtime').className = 'realtime px-2 py-1 bg-red-500 text-white rounded';
-              }
-            };
-          }
-        ]
-      }
+      padding: [20, 50, 40, 60]
     };
 
-    uPlotInstance = new uPlot(opts, data.data, chartRef);
+    try {
+      uPlotInstance = new uPlot(opts, processedData.data, chartRef);
+      console.log('Chart initialized with', processedData.data[0].length, 'points');
+    } catch (error) {
+      console.error('Error initializing chart:', error);
+    }
   };
 
   onMount(() => {
-    const data = processData(props.data);
-    if (data) initChart(data);
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (uPlotInstance && chartRef) {
-        uPlotInstance.setSize({ width: chartRef.clientWidth, height: 500 });
-      }
-    });
-
-    resizeObserver.observe(chartRef);
-
-    onCleanup(() => {
-      resizeObserver.disconnect();
-      stopRealtime();
-      if (uPlotInstance) {
-        uPlotInstance.destroy();
-      }
-    });
+    if (chartRef) {
+      // Initial render
+      requestAnimationFrame(initChart);
+      
+      // Handle resize
+      const resizeObserver = new ResizeObserver(() => {
+        if (uPlotInstance && chartRef) {
+          uPlotInstance.setSize({
+            width: chartRef.clientWidth,
+            height: 400
+          });
+        }
+      });
+      
+      resizeObserver.observe(chartRef);
+      
+      onCleanup(() => {
+        resizeObserver.disconnect();
+        if (uPlotInstance) {
+          uPlotInstance.destroy();
+        }
+      });
+    }
   });
 
   createEffect(() => {
-    const data = processData(props.data);
-    if (data) initChart(data);
+    if (props.data && chartRef) {
+      initChart();
+    }
   });
 
+  // Get current data summary
+  const getDataSummary = () => {
+    const data = props.data?.[0]?.data;
+    if (!data?.length) return null;
+
+    const firstPoint = data[0];
+    const lastPoint = data[data.length - 1];
+
+    return {
+      points: data.length,
+      timeRange: {
+        start: formatDate(firstPoint.timestamp || firstPoint.secs),
+        end: formatDate(lastPoint.timestamp || lastPoint.secs)
+      },
+      latest: (lastPoint.value || lastPoint.val)?.toFixed(2)
+    };
+  };
+
   return (
-    <div class="relative">
-      <div ref={chartRef} class="w-full" />
-      {isLoading() && (
-        <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-          <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-        </div>
-      )}
+    <div class="space-y-4">
+      <div class="relative bg-white rounded-lg shadow-sm">
+        <div 
+          ref={chartRef}
+          class="w-full h-[400px] p-4"
+          style="min-height: 400px"
+        />
+        
+        {isLoading() && (
+          <div class="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75">
+            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+          </div>
+        )}
+      </div>
+
+      {/* Data Summary */}
+      <div class="px-4 py-2 bg-gray-50 rounded text-sm">
+        {(() => {
+          const summary = getDataSummary();
+          if (!summary) return <div>No data available</div>;
+          
+          return (
+            <>
+              <div>Data Points: {summary.points}</div>
+              <div>Time Range: {summary.timeRange.start} - {summary.timeRange.end}</div>
+              <div class="text-gray-500 text-xs mt-1">
+                Latest Value: {summary.latest} {props.data?.[0]?.meta?.EGU}
+              </div>
+            </>
+          );
+        })()}
+      </div>
     </div>
   );
 };

@@ -3,9 +3,12 @@ import { createSignal, createEffect } from 'solid-js';
 const TimeRangeSelector = (props) => {
   const [startDate, setStartDate] = createSignal('');
   const [endDate, setEndDate] = createSignal('');
-  const [timezone, setTimezone] = createSignal(Intl.DateTimeFormat().resolvedOptions().timeZone);
-  const [relativeRange, setRelativeRange] = createSignal('1h'); // Default to 1 hour
+  const [timezone, setTimezone] = createSignal(
+    Intl.DateTimeFormat().resolvedOptions().timeZone
+  );
+  const [relativeRange, setRelativeRange] = createSignal('1h');
 
+  // Configuration options
   const timezones = [
     'UTC',
     'America/Los_Angeles',
@@ -17,43 +20,85 @@ const TimeRangeSelector = (props) => {
     'Asia/Tokyo'
   ];
 
-  const relativeRanges = [
-    { value: 'custom', label: 'Custom Range' },
-    { value: '15m', label: 'Last 15 Minutes' },
-    { value: '30m', label: 'Last 30 Minutes' },
-    { value: '1h', label: 'Last Hour' },
-    { value: '3h', label: 'Last 3 Hours' },
-    { value: '6h', label: 'Last 6 Hours' },
-    { value: '12h', label: 'Last 12 Hours' },
-    { value: '24h', label: 'Last 24 Hours' },
-    { value: '2d', label: 'Last 2 Days' },
-    { value: '7d', label: 'Last Week' },
-    { value: '30d', label: 'Last 30 Days' }
+  const timeRanges = [
+    { 
+      value: 'custom', 
+      label: 'Custom Range',
+      operator: null
+    },
+    { 
+      value: '15m', 
+      label: 'Last 15 Minutes',
+      operator: null  // Raw data for short ranges
+    },
+    { 
+      value: '30m', 
+      label: 'Last 30 Minutes',
+      operator: null
+    },
+    { 
+      value: '1h', 
+      label: 'Last Hour',
+      operator: 'optimized_360'  // 10-second resolution
+    },
+    { 
+      value: '3h', 
+      label: 'Last 3 Hours',
+      operator: 'optimized_1080'  // 10-second resolution
+    },
+    { 
+      value: '6h', 
+      label: 'Last 6 Hours',
+      operator: 'optimized_720'  // 30-second resolution
+    },
+    { 
+      value: '12h', 
+      label: 'Last 12 Hours',
+      operator: 'optimized_720'
+    },
+    { 
+      value: '24h', 
+      label: 'Last 24 Hours',
+      operator: 'optimized_1440'  // 1-minute resolution
+    },
+    { 
+      value: '2d', 
+      label: 'Last 2 Days',
+      operator: 'optimized_2880'
+    },
+    { 
+      value: '7d', 
+      label: 'Last Week',
+      operator: 'optimized_2016'  // 5-minute resolution with statistics
+    },
+    { 
+      value: '30d', 
+      label: 'Last 30 Days',
+      operator: 'optimized_4320'  // 10-minute resolution with statistics
+    }
   ];
 
   const getRelativeTimeRange = (value) => {
     const now = new Date();
     const start = new Date(now);
-
     const match = value.match(/^(\d+)([mhd])$/);
+    
     if (!match) return { start: now, end: now };
 
     const [_, amount, unit] = match;
     const num = parseInt(amount);
 
     switch (unit) {
-      case 'm':
-        start.setMinutes(start.getMinutes() - num);
-        break;
-      case 'h':
-        start.setHours(start.getHours() - num);
-        break;
-      case 'd':
-        start.setDate(start.getDate() - num);
-        break;
+      case 'm': start.setMinutes(start.getMinutes() - num); break;
+      case 'h': start.setHours(start.getHours() - num); break;
+      case 'd': start.setDate(start.getDate() - num); break;
     }
 
-    return { start, end: now };
+    return { 
+      start, 
+      end: now,
+      operator: timeRanges.find(r => r.value === value)?.operator
+    };
   };
 
   const formatForInput = (date) => {
@@ -63,46 +108,27 @@ const TimeRangeSelector = (props) => {
            '-' + String(d.getMonth() + 1).padStart(2, '0') +
            '-' + String(d.getDate()).padStart(2, '0') +
            'T' + String(d.getHours()).padStart(2, '0') +
-           ':' + String(d.getMinutes()).padStart(2, '0');
+           ':' + String(d.getMinutes()).padStart(2, '0') +
+           ':' + String(d.getSeconds()).padStart(2, '0');
   };
 
-  const formatForAPI = (date) => {
-    if (!date) return '';
-    const d = new Date(date);
-    const tzOffset = new Date(d).toLocaleString('en-US', {
-      timeZone: timezone(),
-      timeZoneName: 'shortOffset'
-    }).split(' ').pop();
-    
-    return d.toISOString().slice(0, -5) + tzOffset.replace('GMT', '');
-  };
+  const updateTimeRange = (start, end, operator = null) => {
+    setStartDate(formatForInput(start));
+    setEndDate(formatForInput(end));
 
-  const updateTimeRange = (start, end) => {
-    const startInput = formatForInput(start);
-    const endInput = formatForInput(end);
-    
-    setStartDate(startInput);
-    setEndDate(endInput);
-
-    // Send formatted dates to parent
     if (props.onChange) {
-      props.onChange(
-        new Date(start),
-        new Date(end)
-      );
+      props.onChange(start, end, operator);
     }
   };
 
-  // Handle relative range selection
   const handleRelativeRangeChange = (value) => {
     setRelativeRange(value);
     if (value === 'custom') return;
 
-    const { start, end } = getRelativeTimeRange(value);
-    updateTimeRange(start, end);
+    const { start, end, operator } = getRelativeTimeRange(value);
+    updateTimeRange(start, end, operator);
   };
 
-  // Handle manual date input
   const handleDateInput = (isStart, value) => {
     if (isStart) {
       setStartDate(value);
@@ -114,19 +140,28 @@ const TimeRangeSelector = (props) => {
     setRelativeRange('custom');
   };
 
-  // Initialize when component mounts or timezone changes
+  const handleTimezoneChange = (e) => {
+    const tz = e.target.value;
+    setTimezone(tz);
+    if (props.onTimezoneChange) {
+      props.onTimezoneChange(tz);
+    }
+  };
+
+  // Initialize the time range
   createEffect(() => {
-    const { start, end } = getRelativeTimeRange(relativeRange());
-    updateTimeRange(start, end);
+    const { start, end, operator } = getRelativeTimeRange(relativeRange());
+    updateTimeRange(start, end, operator);
   });
 
   return (
     <div class="flex flex-col gap-4">
+      {/* Timezone Selector */}
       <div class="flex flex-col gap-2">
         <label class="font-medium">Timezone</label>
         <select
           value={timezone()}
-          onChange={(e) => setTimezone(e.target.value)}
+          onChange={handleTimezoneChange}
           class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           {timezones.map(tz => (
@@ -135,6 +170,7 @@ const TimeRangeSelector = (props) => {
         </select>
       </div>
 
+      {/* Time Range Selector */}
       <div class="flex flex-col gap-2">
         <label class="font-medium">Time Range</label>
         <select
@@ -142,12 +178,13 @@ const TimeRangeSelector = (props) => {
           onChange={(e) => handleRelativeRangeChange(e.target.value)}
           class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
-          {relativeRanges.map(range => (
+          {timeRanges.map(range => (
             <option value={range.value}>{range.label}</option>
           ))}
         </select>
       </div>
 
+      {/* Start Time Input */}
       <div class="flex flex-col gap-2">
         <label class="font-medium">Start Time ({timezone()})</label>
         <input
@@ -159,6 +196,7 @@ const TimeRangeSelector = (props) => {
         />
       </div>
 
+      {/* End Time Input */}
       <div class="flex flex-col gap-2">
         <label class="font-medium">End Time ({timezone()})</label>
         <input
@@ -170,6 +208,7 @@ const TimeRangeSelector = (props) => {
         />
       </div>
 
+      {/* Current Range Display */}
       <div class="text-sm text-gray-600 mt-2">
         Current range: {startDate()} to {endDate()} ({timezone()})
       </div>
