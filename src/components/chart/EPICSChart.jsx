@@ -1,18 +1,56 @@
 import { onMount, createEffect, createSignal, onCleanup } from 'solid-js';
 import uPlot from 'uplot';
-import { fetchBinnedData } from '../../utils/archiverApi';
 import 'uplot/dist/uPlot.min.css';
 
 const EPICSChart = (props) => {
   let chartRef;
   let uPlotInstance;
   const [isLoading, setIsLoading] = createSignal(false);
+  const [processingMode, setProcessingMode] = createSignal('mean');
+
+  // All available processing modes
+  const displayModes = [
+    { value: 'raw', label: 'Raw Data' },
+    { value: 'firstSample', label: 'First Sample' },
+    { value: 'lastSample', label: 'Last Sample' },
+    { value: 'firstFill', label: 'First Fill (with interpolation)' },
+    { value: 'lastFill', label: 'Last Fill (with interpolation)' },
+    { value: 'mean', label: 'Mean Value' },
+    { value: 'min', label: 'Minimum Value' },
+    { value: 'max', label: 'Maximum Value' },
+    { value: 'count', label: 'Sample Count' },
+    { value: 'median', label: 'Median Value' },
+    { value: 'std', label: 'Standard Deviation' }
+  ];
 
   const formatDate = (timestamp) => {
     if (!timestamp) return 'N/A';
-    // Convert milliseconds to seconds if needed
-    const seconds = String(timestamp).length > 10 ? Math.floor(timestamp / 1000) : timestamp;
-    return new Date(seconds * 1000).toLocaleString();
+    return new Date(timestamp).toLocaleString();
+  };
+
+  const getProcessedValue = (point, mode) => {
+    if (!point) return null;
+    
+    if (Array.isArray(point.val)) {
+      // Handle statistical data [mean, stddev, min, max, count]
+      const [mean, std, min, max, count] = point.val;
+      switch (mode) {
+        case 'mean': return mean;
+        case 'min': return min;
+        case 'max': return max;
+        case 'std': return std;
+        case 'count': return count;
+        case 'firstSample': return mean;
+        case 'lastSample': return mean;
+        case 'firstFill': return mean;
+        case 'lastFill': return mean;
+        case 'median': return mean;
+        default: return mean;
+      }
+    } else {
+      // Handle raw data
+      return point.value ?? point.val;
+    }
   };
 
   const processData = (rawData) => {
@@ -21,45 +59,102 @@ const EPICSChart = (props) => {
       return null;
     }
 
-    // Extract metadata and data points
     const meta = rawData[0].meta;
     const dataPoints = rawData[0].data;
+    const mode = processingMode();
+    
+    console.log('Processing data points:', dataPoints.length, 'with mode:', mode);
 
-    console.log('Sample datapoint:', dataPoints[0]);
-
-    // Process data points
     const timestamps = [];
     const values = [];
+    const mins = [];
+    const maxs = [];
+    let isStatisticalData = false;
 
-    dataPoints.forEach(point => {
-      // Convert to seconds if in milliseconds
-      const timestamp = point.timestamp ? Math.floor(point.timestamp / 1000) : point.secs;
-      const value = point.value ?? point.val;
+    dataPoints.forEach((point, index) => {
+      if (!point) return;
 
-      if (timestamp && typeof value === 'number') {
-        timestamps.push(timestamp);
-        values.push(value);
+      const timestamp = point.timestamp || (point.secs * 1000);
+      
+      if (Array.isArray(point.val)) {
+        isStatisticalData = true;
+        const value = getProcessedValue(point, mode);
+        
+        if (typeof value === 'number' && !isNaN(value)) {
+          timestamps.push(timestamp);
+          values.push(value);
+          
+          if (mode === 'minmax' || mode === 'raw') {
+            mins.push(point.val[2]); // min
+            maxs.push(point.val[3]); // max
+          } else {
+            mins.push(value);
+            maxs.push(value);
+          }
+        }
+      } else {
+        const value = point.value ?? point.val;
+        if (typeof value === 'number' && !isNaN(value)) {
+          timestamps.push(timestamp);
+          values.push(value);
+          mins.push(value);
+          maxs.push(value);
+        }
       }
     });
 
-    console.log('Processed data:', {
-      points: timestamps.length,
-      first: { time: formatDate(timestamps[0]), value: values[0] },
-      last: { time: formatDate(timestamps[timestamps.length - 1]), value: values[values.length - 1] }
-    });
+    if (timestamps.length === 0) {
+      console.log('No valid data points found');
+      return null;
+    }
 
-    // Find min/max for y-axis
-    const minVal = Math.min(...values);
-    const maxVal = Math.max(...values);
+    // Calculate y-axis range
+    const allValues = [...values];
+    if (mode === 'minmax' || mode === 'raw') {
+      allValues.push(...mins, ...maxs);
+    }
+    const minVal = Math.min(...allValues);
+    const maxVal = Math.max(...allValues);
     const range = maxVal - minVal;
     const padding = range * 0.1;
 
     return {
-      name: meta.name,
-      unit: meta.EGU,
-      data: [timestamps, values],
-      yRange: [minVal - padding, maxVal + padding]
+      name: meta?.name ?? 'Unknown',
+      unit: meta?.EGU ?? '',
+      data: [timestamps, values, mins, maxs],
+      yRange: [minVal - padding, maxVal + padding],
+      isStatisticalData: isStatisticalData && (mode === 'minmax' || mode === 'raw')
     };
+  };
+
+  const getTimeAxisSplits = (data) => {
+    if (!data?.[0]?.length) return null;
+    
+    const timeRange = data[0][data[0].length - 1] - data[0][0];
+    const hours = timeRange / (3600 * 1000);
+    
+    if (hours <= 2) {
+      return {
+        values: (u, vals) => vals.map(v => new Date(v).toLocaleTimeString()),
+        space: 60
+      };
+    } else if (hours <= 24) {
+      return {
+        values: (u, vals) => vals.map(v => {
+          const d = new Date(v);
+          return d.getMinutes() === 0 ? d.toLocaleTimeString() : '';
+        }),
+        space: 80
+      };
+    } else {
+      return {
+        values: (u, vals) => vals.map(v => {
+          const d = new Date(v);
+          return d.getHours() === 0 ? d.toLocaleDateString() : '';
+        }),
+        space: 100
+      };
+    }
   };
 
   const initChart = () => {
@@ -68,14 +163,14 @@ const EPICSChart = (props) => {
     const processedData = processData(props.data);
     if (!processedData?.data?.[0]?.length) return;
 
-    // Clean up existing instance
     if (uPlotInstance) {
       uPlotInstance.destroy();
       uPlotInstance = null;
     }
 
-    // Clear container
     chartRef.innerHTML = '';
+
+    const timeAxis = getTimeAxisSplits(processedData.data);
 
     const opts = {
       title: processedData.name,
@@ -94,15 +189,27 @@ const EPICSChart = (props) => {
             show: true,
             size: 4,
           },
-          value: (u, v) => v?.toFixed(2),
-          scale: "temp"
-        }
-      ],
+          value: (u, v) => v?.toFixed(2)
+        },
+        processedData.isStatisticalData ? {
+          label: "Min",
+          stroke: "rgba(0, 102, 204, 0.2)",
+          fill: "rgba(0, 102, 204, 0.1)",
+          points: { show: false },
+          value: (u, v) => v?.toFixed(2)
+        } : null,
+        processedData.isStatisticalData ? {
+          label: "Max",
+          stroke: "rgba(0, 102, 204, 0.2)",
+          points: { show: false },
+          value: (u, v) => v?.toFixed(2)
+        } : null
+      ].filter(Boolean),
       scales: {
         x: {
           time: true,
         },
-        temp: {
+        y: {
           auto: false,
           range: processedData.yRange
         }
@@ -110,19 +217,25 @@ const EPICSChart = (props) => {
       axes: [
         {
           scale: "x",
-          values: (u, vals) => vals.map(formatDate),
+          ...timeAxis,
           side: 2,
           grid: { show: true, stroke: "#dedede" },
           ticks: { show: false }
         },
         {
-          scale: "temp",
+          scale: "y",
           values: (u, vals) => vals.map(v => v.toFixed(2)),
           side: 3,
           grid: { show: true, stroke: "#dedede" },
           ticks: { show: false }
         }
       ],
+      bands: processedData.isStatisticalData ? [
+        {
+          series: [2, 3],
+          fill: "rgba(0, 102, 204, 0.1)",
+        }
+      ] : [],
       padding: [20, 50, 40, 60]
     };
 
@@ -134,12 +247,38 @@ const EPICSChart = (props) => {
     }
   };
 
+  const getDataSummary = () => {
+    const data = props.data?.[0]?.data;
+    if (!data?.length) return null;
+
+    const firstPoint = data[0];
+    const lastPoint = data[data.length - 1];
+    
+    const getValue = (point) => {
+      if (!point) return 'N/A';
+      const value = getProcessedValue(point, processingMode());
+      return typeof value === 'number' ? value.toFixed(2) : 'N/A';
+    };
+
+    const getTimestamp = (point) => {
+      if (!point) return null;
+      return point.timestamp || (point.secs * 1000);
+    };
+
+    return {
+      points: data.length,
+      timeRange: {
+        start: formatDate(getTimestamp(firstPoint)),
+        end: formatDate(getTimestamp(lastPoint))
+      },
+      latest: getValue(lastPoint)
+    };
+  };
+
   onMount(() => {
     if (chartRef) {
-      // Initial render
       requestAnimationFrame(initChart);
       
-      // Handle resize
       const resizeObserver = new ResizeObserver(() => {
         if (uPlotInstance && chartRef) {
           uPlotInstance.setSize({
@@ -166,29 +305,29 @@ const EPICSChart = (props) => {
     }
   });
 
-  // Get current data summary
-  const getDataSummary = () => {
-    const data = props.data?.[0]?.data;
-    if (!data?.length) return null;
-
-    const firstPoint = data[0];
-    const lastPoint = data[data.length - 1];
-
-    return {
-      points: data.length,
-      timeRange: {
-        start: formatDate(firstPoint.timestamp || firstPoint.secs),
-        end: formatDate(lastPoint.timestamp || lastPoint.secs)
-      },
-      latest: (lastPoint.value || lastPoint.val)?.toFixed(2)
-    };
-  };
-
   return (
     <div class="space-y-4">
+      <div class="mb-4">
+        <label class="block mb-2 text-sm font-medium">Display Mode:</label>
+        <select
+          value={processingMode()}
+          onChange={(e) => {
+            setProcessingMode(e.target.value);
+            if (props.data) {
+              initChart();
+            }
+          }}
+          class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          {displayModes.map(mode => (
+            <option value={mode.value}>{mode.label}</option>
+          ))}
+        </select>
+      </div>
+
       <div class="relative bg-white rounded-lg shadow-sm">
         <div 
-          ref={chartRef}
+          ref={el => chartRef = el}
           class="w-full h-[400px] p-4"
           style="min-height: 400px"
         />
@@ -200,7 +339,6 @@ const EPICSChart = (props) => {
         )}
       </div>
 
-      {/* Data Summary */}
       <div class="px-4 py-2 bg-gray-50 rounded text-sm">
         {(() => {
           const summary = getDataSummary();
@@ -211,7 +349,8 @@ const EPICSChart = (props) => {
               <div>Data Points: {summary.points}</div>
               <div>Time Range: {summary.timeRange.start} - {summary.timeRange.end}</div>
               <div class="text-gray-500 text-xs mt-1">
-                Latest Value: {summary.latest} {props.data?.[0]?.meta?.EGU}
+                Latest Value: {summary.latest} {props.data?.[0]?.meta?.EGU || ''} 
+                ({processingMode()} mode)
               </div>
             </>
           );
